@@ -1,0 +1,83 @@
+diff --git a/server/src/routes/storage.ts b/server/src/routes/storage.ts
+index 2caa32e..46c9ae7 100644
+--- a/server/src/routes/storage.ts
++++ b/server/src/routes/storage.ts
+@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid";
+ import moment from 'moment-timezone';
+ import cron from 'node-cron';
+ import { requireSignIn } from '../middlewares/auth';
++import { requireAPIKey } from '../middlewares/api';
+ import Robot from '../models/Robot';
+ import Run from '../models/Run';
+ import { AuthenticatedRequest } from './record';
+@@ -1460,6 +1461,70 @@ router.delete('/schedule/:id', requireSignIn, async (req: AuthenticatedRequest,
+   }
+ });
+ 
++/**
++ * POST endpoint for aborting a run, authenticated via API key (x-api-key).
++ * Registered BEFORE the session-guarded route so API-key clients (e.g. the
++ * Hermes maxun tool) can cancel runs without a session cookie. The
++ * requireAPIKey middleware populates req.user from the API key, so the
++ * identical body logic applies.
++ */
++router.post('/runs/abort/:id', requireAPIKey, async (req: AuthenticatedRequest, res) => {
++  try {
++    if (!req.user) { return res.status(401).json({ error: 'Unauthorized' }); }
++
++    const run = await Run.findOne({ where: { runId: req.params.id } });
++    if (!run) {
++      return res.status(404).json({ error: 'Run not found' });
++    }
++
++    const robot = await Robot.findOne({ where: { 'recording_meta.id': run.robotMetaId, userId: req.user.id } });
++    if (!robot) {
++      return res.status(404).json({ error: 'Run not found' });
++    }
++
++    if (!['running', 'queued'].includes(run.status)) {
++      return res.status(400).json({
++        error: `Cannot abort run with status: ${run.status}`
++      });
++    }
++
++    const isQueued = run.status === 'queued';
++
++    await run.update({ status: 'aborting' });
++
++    if (isQueued) {
++      await run.update({
++        status: 'aborted',
++        finishedAt: new Date().toLocaleString(),
++        log: 'Run aborted while queued'
++      });
++      return res.json({ success: true, message: 'Queued run aborted', isQueued: true });
++    }
++
++    try {
++      const browser = browserPool.getRemoteBrowser(run.browserId);
++      if (browser && browser.interpreter) {
++        logger.log('info', `Immediately stopping interpreter for run ${req.params.id}`);
++        await browser.interpreter.stopInterpretation();
++      }
++    } catch (immediateStopError: any) {
++      logger.log('warn', `Failed to immediately stop interpreter: ${immediateStopError.message}`);
++    }
++
++    const jobId = await addJob(QUEUE_NAMES.ABORT_RUN, {
++      userId: req.user.id,
++      runId: req.params.id,
++    }, { maxAttempts: 3 });
++
++    logger.log('info', `Abort signal sent for run ${req.params.id}, job ID: ${jobId}`);
++    return res.json({ success: true, message: 'Run stopped immediately, cleanup queued', jobId, isQueued: false });
++  } catch (e) {
++    const { message } = e as Error;
++    logger.log('error', `Error aborting run ${req.params.id}: ${message}`);
++    return res.status(500).json({ error: 'Failed to abort run' });
++  }
++});
++
+ /**
+  * POST endpoint for aborting a current interpretation of the run.
+  */
