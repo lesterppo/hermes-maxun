@@ -87,13 +87,6 @@ See `skills/maxun-tool/references/maxun-selfhost-recipe.md` for the docker-compo
 `.env` essentials (notably `BROWSER_WS_HOST=browser`, required for the AI robot
 builder's browser).
 
-**NordVPN note:** If running Maxun in Docker on a NordVPN-connected Linux host,
-NordVPN's firewall blocks Docker bridge networking. Fix:
-```bash
-nordvpn set lan-discovery enabled
-nordvpn whitelist add port 8080
-```
-
 ## Optional: API-key abort patch
 
 Upstream Maxun gates the abort endpoint behind a session cookie, so the

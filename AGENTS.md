@@ -50,13 +50,6 @@ MAXUN_API_URL=http://localhost:8080   # or cloud URL
 See `skills/maxun-tool/references/maxun-selfhost-recipe.md` for the full
 docker compose setup, user registration, and API key generation.
 
-Key gotcha: **NordVPN blocks Docker bridge networking.** If `nordvpn status`
-shows Firewall enabled, run:
-```bash
-nordvpn set lan-discovery enabled
-nordvpn whitelist add port 8080
-```
-
 ## How the tool works
 
 The tool exposes 9 actions through a single `maxun` registry entry:

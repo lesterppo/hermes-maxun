@@ -132,11 +132,6 @@ Output is always JSON. On success: `{"ok": true, ...}`. On failure:
 
 ## Pitfalls (learned from live testing)
 
-- **NordVPN blocks Docker networking (host→container).** If `nordvpn status`
-  shows Firewall: enabled, the host cannot reach Docker containers even via
-  `localhost` port maps. Fix: `nordvpn set lan-discovery enabled` and
-  optionally `nordvpn whitelist add port 8080`. This is REQUIRED on any
-  NordVPN-connected Linux host running Maxun in Docker.
 - **Put navigation/pagination in the `create_ai_robot` prompt, not in `run`.**
   Maxun's `run` replays the workflow built at robot creation — runtime
   `prompt_instructions` do NOT re-plan navigation or inject scroll/load-more.
