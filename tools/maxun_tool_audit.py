@@ -1,15 +1,7 @@
-"""Reliability audit harness for the Hermes `maxun` tool.
+"""Reliability audit for the Hermes `maxun` tool (token-efficient v2).
 
 Run:  python3 tools/maxun_tool_audit.py
-Set MAXUN_API_KEY + MAXUN_API_URL to also exercise the live-call paths.
-
-Covers the tool-reliability-audit criteria:
-  1. Load (< 50ms schema/availability check)
-  2. Input validation (empty/missing/bad-url/whitespace)
-  3. Token cost (compact JSON, row-capped previews, full data offloaded)
-  4. Accuracy (live create/run returns expected shape)
-  5. Edge cases (bogus id, Maxun 409 dedup, finished-run abort)
-  6. Integration (registry registration, flat schema, check_fn, requires_env)
+Set MAXUN_API_KEY + MAXUN_API_URL to exercise live-call paths.
 """
 
 import json
@@ -18,7 +10,6 @@ import time
 
 import tools.maxun_tool as m
 
-
 results = []
 
 
@@ -26,116 +17,141 @@ def t(name, ok, detail=""):
     results.append(("PASS" if ok else "FAIL", name, str(detail)))
 
 
-# ---------------------------------------------------------------------------
-# 1. Load
-# ---------------------------------------------------------------------------
+# ── 1. Load ───────────────────────────────────────────────────────────────────
 t0 = time.time()
 _ = m.MAXUN_SCHEMA
 _ = m._maxun_available()
 t("availability check < 50ms", (time.time() - t0) * 1000 < 50, f"{(time.time()-t0)*1000:.1f}ms")
-t("schema available < 50ms", "name" in m.MAXUN_SCHEMA and "parameters" in m.MAXUN_SCHEMA, "")
+t("schema name is maxun", m.MAXUN_SCHEMA["name"] == "maxun")
 
-# ---------------------------------------------------------------------------
-# 2. Input validation
-# ---------------------------------------------------------------------------
-# unknown action
+# ── 2. Input validation ──────────────────────────────────────────────────────
+for action, kw, label in [
+    ("", {}, "empty action"),
+    ("bogus_action", {}, "unknown action"),
+    ("create_ai_robot", {}, "no prompt"),
+    ("create_ai_robot", {"prompt": "x", "url": "bad"}, "bad url"),
+    ("create_ai_robot", {"prompt": "  "}, "whitespace prompt"),
+    ("create_search", {}, "no query"),
+    ("create_search", {"query": "  "}, "whitespace query"),
+    ("run", {}, "no robot_id"),
+    ("duplicate", {"robot_id": "x"}, "no target_url"),
+    ("duplicate", {"robot_id": "x", "target_url": "bad"}, "bad target_url"),
+    ("get_robot", {"robot_id": ""}, "empty robot_id"),
+    ("list_runs", {"robot_id": ""}, "empty robot_id"),
+    ("abort_run", {"run_id": ""}, "empty run_id"),
+]:
+    d = json.loads(m.maxun_tool(action, **kw))
+    t(f"reject {label}", "e" in d, d.get("e", "")[:50])
+
+# unknown action also lists valid actions
 d = json.loads(m.maxun_tool("bogus_action"))
-t("reject unknown action", "error" in d, d.get("error", "")[:40])
-# missing action
-d = json.loads(m.maxun_tool(""))
-t("reject missing action", "error" in d, d.get("error", "")[:40])
-# create_ai_robot needs prompt
-d = json.loads(m.maxun_tool("create_ai_robot"))
-t("create_ai_robot needs prompt", "error" in d, d.get("error", "")[:40])
-# create_ai_robot bad url
-d = json.loads(m.maxun_tool("create_ai_robot", prompt="x", url="not a url"))
-t("create_ai_robot rejects bad url", "error" in d, d.get("error", "")[:40])
-# create_search without query
-d = json.loads(m.maxun_tool("create_search"))
-t("create_search needs query", "error" in d, d.get("error", "")[:40])
-# run without robot_id
-d = json.loads(m.maxun_tool("run"))
-t("run needs robot_id", "error" in d, d.get("error", "")[:40])
-# abort_run without run_id
-d = json.loads(m.maxun_tool("abort_run", robot_id="x"))
-t("abort_run needs run_id", "error" in d, d.get("error", "")[:40])
-# run wait=false returns run_id without requiring completion
-d = json.loads(m.maxun_tool("run", robot_id="x", wait=False))
-t("run wait=false returns run_id/started", "run_id" in d or "error" in d, str(d)[:50])
-# create_search defaults mode to 'discover'
-d = json.loads(m.maxun_tool("create_search", query="test news"))
-t("create_search defaults mode discover", "mode" in d and d.get("mode") == "discover" or "error" in d, str(d)[:40])
-# llm passthrough: offline, just ensure it doesn't crash / is accepted by handler signature
+t("unknown action has actions list", isinstance(d.get("actions"), list))
+
+# llm passthrough — ensure handler accepts keys
 d = json.loads(m.maxun_tool("create_ai_robot", prompt="x", url="https://example.com",
-                   llm_provider="openai", llm_model="gpt-4o", llm_api_key="sk-test"))
-t("create_ai_robot accepts llm passthrough", "error" not in d or "url" not in str(d), str(d)[:40])
+                             llm_provider="openai", llm_model="gpt-4o", llm_api_key="sk-test"))
+t("llm passthrough accepted", "e" not in d or "url" not in str(d), str(d)[:40])
+
+# run wait=false
+d = json.loads(m.maxun_tool("run", robot_id="x", wait=False))
+t("run wait=false returns started shape", "rid" in d or "e" in d, str(d)[:50])
+
+# create_search defaults mode
+d = json.loads(m.maxun_tool("create_search", query="test"))
+t("create_search defaults mode", d.get("md") == "discover" or "e" in d, str(d)[:40])
+
 # duplicate without target_url
 d = json.loads(m.maxun_tool("duplicate", robot_id="x"))
-t("duplicate needs target_url", "error" in d, d.get("error", "")[:40])
+t("duplicate needs target_url", "e" in d, d.get("e", "")[:40])
 
-# ---------------------------------------------------------------------------
-# 3. Token cost (offline: schema description + a synthetic compact run)
-# ---------------------------------------------------------------------------
-desc = m.MAXUN_SCHEMA["description"]
-t("schema description < 500 chars", len(desc) < 500, f"{len(desc)} chars")
-synthetic_run = {
-    "runId": "abc", "status": "success", "robotMetaId": "r1",
-    "data": {"listData": {f"col{i}": list(range(500)) for i in range(5)},
-             "textData": {"k": "v"}, "links": [f"https://x/{i}" for i in range(200)]},
-    "screenshots": [f"http://s/{i}.png" for i in range(50)],
-}
-compact = m._compact_run(synthetic_run)
-text = json.dumps(compact, indent=2)
-t("compact run output < 2500 tokens (~10k chars)", len(text) // 4 < 2500, f"{len(text)//4} tok")
-t("compact run reports row count not all rows", compact["list_data"]["_rows"] == 500
-  and len(compact["list_data"]["preview"]["col0"]) == m.MAX_INLINE_ROWS,
-  f"rows={compact['list_data']['_rows']}")
-t("compact run caps screenshots", compact["screenshot_count"] == 50
-  and len(compact["screenshots"]) == m.MAX_INLINE_SCREENSHOTS,
-  f"shown={len(compact['screenshots'])}/{compact['screenshot_count']}")
+# ── 3. Token cost ────────────────────────────────────────────────────────────
+schema_s = json.dumps(m.MAXUN_SCHEMA)
+t("schema < 2100 chars", len(schema_s) < 2100, f"{len(schema_s)} chars")
+t("desc < 400 chars", len(m.MAXUN_SCHEMA["description"]) < 400, f"{len(m.MAXUN_SCHEMA['description'])} chars")
 
-# ---------------------------------------------------------------------------
-# 4. Accuracy / 5. Edge cases (only with a live server)
-# ---------------------------------------------------------------------------
+# Compact keys check
+synth = {"runId": "abc", "status": "success", "robotId": "r1",
+         "data": {"listData": {"col0": list(range(500))}},
+         "links": [f"https://x/{i}" for i in range(200)],
+         "screenshots": [f"http://s/{i}.png" for i in range(50)]}
+compact = m._compact_run(synth)
+text = json.dumps(compact)
+t("compact run < 2500 tok (~10k chars)", len(text) // 4 < 2500, f"{len(text)//4} tok")
+t("compact rows uses n/c/v", sorted(m._compact_rows({"x": [1, 2]}).keys()) == ["c", "n", "v"])
+t("compact run uses short keys", all(len(k) <= 3 for k in compact.keys()),
+  f"keys: {sorted(compact.keys())}")
+
+# Row cap
+cr = m._compact_rows({"col0": list(range(500))})
+t("row cap reports count", cr["n"] == 500 and len(cr["v"]["col0"]) == m.MAX_INLINE_ROWS,
+  f"n={cr['n']}, preview={len(cr['v']['col0'])}")
+
+# Screenshot cap
+t("screenshot cap", compact.get("ns") == 50 and len(compact.get("sh", [])) == m.MAX_INLINE_SCREENSHOTS)
+
+# ── 4. Live ──────────────────────────────────────────────────────────────────
 LIVE = m._maxun_available()
 if LIVE:
-    # list_robots should succeed (possibly empty)
     d = json.loads(m.maxun_tool("list_robots"))
-    t("list_robots live ok or structured error", "ok" in d or "error" in d, str(d)[:40])
-    # get_robot with bogus id -> structured error, not a crash
-    d = json.loads(m.maxun_tool("get_robot", robot_id="does-not-exist-123"))
-    t("get_robot bogus id handled", "error" in d or "ok" in d, str(d)[:60])
-    # create_ai_robot end-to-end
+    t("list_robots live ok", d.get("ok"), f"n={d.get('n')}")
+    t("list_robots compact keys", sorted(d.keys()) == ["n", "ok", "rs"], str(sorted(d.keys())))
+
+    d = json.loads(m.maxun_tool("get_robot", robot_id="nonexistent-999"))
+    t("get_robot bogus handled", "e" in d or "ok" in d, str(d)[:60])
+
     d = json.loads(m.maxun_tool("create_ai_robot",
-                       url="https://www.rottentomatoes.com",
-                       prompt="Extract the top 10 trending movies with title and rating"))
-    t("create_ai_robot live returns robot_id", "robot_id" in d or "error" in d, str(d)[:60])
-    if "robot_id" in d:
-        rid = d["robot_id"]
+                                 url="https://quotes.toscrape.com",
+                                 prompt="Extract 5 quotes with author",
+                                 robot_name=f"Hermes-Audit-{int(time.time())}"))
+    t("create_ai_robot live ok", d.get("ok") and d.get("rid"), f"rid={d.get('rid','?')[:12]}")
+    t("create_ai_robot compact keys", sorted(d.keys()) in (
+        ["ex", "nm", "ok", "rid", "url"], ["ex", "nm", "ok", "rid"]), str(sorted(d.keys())))
+
+    rid = d.get("rid")
+    if rid:
         d2 = json.loads(m.maxun_tool("run", robot_id=rid))
-        t("run live returns compact result", "action" in d2 and d2.get("action") == "run", str(d2)[:60])
-        t("run live saved_to or noted", bool(d2.get("saved_to")) or "note" in d2, str(d2)[:60])
+        t("run live ok", d2.get("ok") and d2.get("s") == "success", f"s={d2.get('s')}")
+        t("run has @ file", bool(d2.get("@")), str(d2.get("@", ""))[:50])
+        t("run compact keys", all(len(k) <= 3 for k in d2.keys() if k != "@"),
+          f"keys: {sorted(d2.keys())}")
+
+        d3 = json.loads(m.maxun_tool("list_runs", robot_id=rid))
+        t("list_runs compact keys", sorted(d3.keys()) == ["bid", "n", "ok", "rs"])
+
+        d4 = json.loads(m.maxun_tool("duplicate", robot_id=rid,
+                                      target_url="https://quotes.toscrape.com/page/2/"))
+        t("duplicate compact keys", sorted(d4.keys()) == ["new", "nm", "ok", "src"])
+
+    d = json.loads(m.maxun_tool("create_search", query="docker", limit=3))
+    t("create_search compact keys", sorted(d.keys()) == ["md", "nm", "ok", "rid"])
+
+    d = json.loads(m.maxun_tool("abort_run", run_id="fake"))
+    t("abort_run handled", "e" in d, str(d)[:80])
 else:
-    t("LIVE tests skipped (no MAXUN_API_KEY/URL) — offline validation only", True, "set env to enable")
+    t("LIVE tests skipped (no env vars)", True)
 
-# ---------------------------------------------------------------------------
-# 6. Integration
-# ---------------------------------------------------------------------------
-t("registered in registry", m.registry is not None)
+# ── 5. Integration ───────────────────────────────────────────────────────────
 registered = any(e.name == "maxun" for e in m.registry._tools.values())
-t("tool named 'maxun' present", registered, "see registry")
-t("check_fn is callable", callable(m._maxun_available))
-t("requires_env documents both keys", set(m.registry._tools["maxun"].requires_env)
-  >= {"MAXUN_API_KEY", "MAXUN_API_URL"}, str(m.registry._tools["maxun"].requires_env))
-t("action enum covers 9 ops", len(m.MAXUN_SCHEMA["parameters"]["properties"]["action"]["enum"]) == 9,
-  str(m.MAXUN_SCHEMA["parameters"]["properties"]["action"]["enum"]))
+t("registered as 'maxun'", registered)
+t("check_fn callable", callable(m._maxun_available))
+entry = m.registry._tools.get("maxun")
+t("requires_env both keys", entry and set(entry.requires_env) >= {"MAXUN_API_KEY", "MAXUN_API_URL"})
+t("9 actions in enum", len(m.MAXUN_SCHEMA["parameters"]["properties"]["action"]["enum"]) == 9)
 
-# ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
+# ── 6. Unconfigured gate ─────────────────────────────────────────────────────
+if LIVE:
+    import os as _os
+    old = _os.environ.pop("MAXUN_API_KEY", None)
+    d = json.loads(m.maxun_tool("list_robots"))
+    t("unconfigured gate fires", d.get("e") == "not configured")
+    t("unconfigured compact keys", sorted(d.keys()) == ["d", "e"])
+    if old:
+        _os.environ["MAXUN_API_KEY"] = old
+
+# ── Report ────────────────────────────────────────────────────────────────────
 passed = sum(1 for r in results if r[0] == "PASS")
 failed = [r for r in results if r[0] == "FAIL"]
-print(f"\n{'='*60}\nMaxun tool reliability audit: {passed}/{len(results)} passed\n{'='*60}")
+print(f"\n{'='*60}\nMaxun tool audit (token-efficient v2): {passed}/{len(results)} passed\n{'='*60}")
 for status, name, detail in results:
     print(f"[{status}] {name:42s} {detail}")
 if failed:

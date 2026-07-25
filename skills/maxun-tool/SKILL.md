@@ -79,12 +79,46 @@ Example agent flow:
 
 ## Quick Reference
 
+Output uses compact 1-2 char keys. Full reference:
+
+| Key | Meaning | Context |
+|-----|---------|---------|
+| `ok` | success flag | all |
+| `e` | error message | error |
+| `d` | detail string | error |
+| `h` | actionable hint | error/run |
+| `n` | count (rows/robots/runs) | list |
+| `rs` | robots/runs array | list |
+| `rid` | primary ID (robot_id or run_id) | create/run |
+| `bid` | robot ID (when run_id is `rid`) | run |
+| `nm` | name | robot/run |
+| `cr` | created timestamp | robot |
+| `s` | status | run |
+| `st` | started timestamp | run |
+| `fn` | finished timestamp | run |
+| `ld` | list data (row-capped) | run |
+| `td` | text data | run |
+| `cd` | crawl data | run |
+| `sd` | search data | run |
+| `pr` | prompt result | run |
+| `sum` | summary | run |
+| `md` | markdown or mode | run/create_search |
+| `lk` | links array | run |
+| `nl` | link count | run |
+| `sh` | screenshots array | run |
+| `ns` | screenshot count | run |
+| `@` | saved file path | run/get_run |
+| `v` | preview values | compact_rows |
+| `c` | column names | compact_rows |
+| `ex` | existing robot flag | create_ai_robot |
+| `src` | source robot ID | duplicate |
+| `new` | new robot ID | duplicate |
+
 Formats for `run`: `markdown`, `html`, `text`, `links`, `summary`,
 `screenshot-visible`, `screenshot-fullpage`.
 
-Output is always JSON. On success: `{"ok": true, "action": ..., ...}`. On
-failure: `{"error": "...", "detail": "...", "hint": "..."}` — never raises into
-the agent loop.
+Output is always JSON. On success: `{"ok": true, ...}`. On failure:
+`{"e": "msg", "d": "detail", "h": "hint"}` — never raises into the agent loop.
 
 ## Procedure
 
@@ -98,6 +132,11 @@ the agent loop.
 
 ## Pitfalls (learned from live testing)
 
+- **NordVPN blocks Docker networking (host→container).** If `nordvpn status`
+  shows Firewall: enabled, the host cannot reach Docker containers even via
+  `localhost` port maps. Fix: `nordvpn set lan-discovery enabled` and
+  optionally `nordvpn whitelist add port 8080`. This is REQUIRED on any
+  NordVPN-connected Linux host running Maxun in Docker.
 - **Put navigation/pagination in the `create_ai_robot` prompt, not in `run`.**
   Maxun's `run` replays the workflow built at robot creation — runtime
   `prompt_instructions` do NOT re-plan navigation or inject scroll/load-more.
